@@ -12,7 +12,8 @@ authors = [
   {name = "Brian Ward", email="bward@flatironinstitute.org"},
 ]
 license = { text = "MIT" }
-dependencies = ["finufft>= 2.2", "torch >= 2", "numpy", "scipy"]
+dependencies = ["finufft @ git+https://github.com/besnardb/finufft.git",
+"torch >= 2", "numpy", "scipy"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -31,6 +32,7 @@ homepage = "https://github.com/flatironinstitute/pytorch-finufft"
 [project.optional-dependencies]
 dev = ["black", "mypy", "isort", "ruff", "pytest", "pytest-cov"]
 cuda = ["cufinufft>=2.2.0"]
+hip = ["cufinufft @ git+https://github.com/besnardb/finufft.git]
 
 [tool.setuptools.dynamic]
 version = { attr = "pytorch_finufft.__version__" }
