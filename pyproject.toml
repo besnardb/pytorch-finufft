@@ -13,7 +13,7 @@ authors = [
 ]
 license = { text = "MIT" }
 dependencies = ["finufft @ git+https://github.com/besnardb/finufft.git#subdirectory=python/finufft",
-"torch >= 2", "numpy", "scipy"]
+"numpy", "scipy"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -31,8 +31,8 @@ homepage = "https://github.com/flatironinstitute/pytorch-finufft"
 
 [project.optional-dependencies]
 dev = ["black", "mypy", "isort", "ruff", "pytest", "pytest-cov"]
-cuda = ["cufinufft>=2.2.0"]
-hip = ["cufinufft @ git+https://github.com/besnardb/finufft.git#subdirectory=python/cufinufft"]
+cuda = ["torch >= 2","cufinufft>=2.2.0"]
+hip = ["torch","cufinufft @ git+https://github.com/besnardb/finufft.git#subdirectory=python/cufinufft"]
 
 [tool.setuptools.dynamic]
 version = { attr = "pytorch_finufft.__version__" }
