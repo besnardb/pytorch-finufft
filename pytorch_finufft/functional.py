@@ -91,6 +91,249 @@ def batch_ifftshift(x: torch.Tensor, n_shifted_dims: int) -> torch.Tensor:
     out: torch.Tensor = torch.fft.ifftshift(x, dim=tuple(range(-n_shifted_dims, 0)))
     return out
 
+class FinufftPlan:
+
+    def __init__(
+        self,
+        type: int,
+        dims: Union[int, Tuple[int, ...]],
+        n_trans: int = 1,
+        eps: float = 1e-6,
+        dtype: torch.dtype = torch.complex64,
+        isign: int = 1,
+        modeord: int = 0,
+        device: Union[str, torch.device] = "cpu",
+        **kwargs,
+    ):
+        """
+        Parameters
+        ----------
+        type : int
+            NUFFT type (1 or 2)
+        dims : int or tuple of int
+            Output dimensions for type 1, input dimensions for type 2
+        n_trans : int
+            Number of transforms to compute in parallel (batch size)
+        eps : float
+            Requested precision
+        dtype : torch.dtype
+            Data type (torch.complex64 or torch.complex128)
+        isign : int
+            Sign in exponent (+1 or -1)
+        modeord : int
+            Mode ordering (0 or 1)
+        device : str or torch.device
+            Device to use ('cpu' or 'cuda')
+        **kwargs
+            Additional arguments passed to the underlying plan
+        """
+        self.type = type
+        self.dims = dims if isinstance(dims, tuple) else (dims,)
+        self.n_trans = n_trans
+        self.eps = eps
+        self.dtype = dtype
+        self.isign = isign
+        self.modeord = modeord
+        self.device = torch.device(device) if isinstance(device, str) else device
+        
+        # Determine which backend to use
+        if self.device.type == "cuda":
+            if not CUFINUFFT_AVAIL:
+                raise RuntimeError("CUDA requested but cufinufft not available")
+            
+            # cufinufft uses complex64/complex128 directly
+            if dtype == torch.complex64:
+                self._c_dtype = "complex64"
+            elif dtype == torch.complex128:
+                self._c_dtype = "complex128"
+            else:
+                raise ValueError(f"Unsupported dtype: {dtype}")
+            
+            self._plan = cufinufft.Plan(
+                type=type,
+                dims=self.dims,
+                n_trans=n_trans,
+                eps=eps,
+                dtype=self._c_dtype,
+                isign=isign,
+                modeord=modeord,
+                gpu_device_id=self.device.index if self.device.index is not None else 0,
+                **kwargs,
+            )
+            self._backend = "cufinufft"
+            
+        else:  # CPU
+            if not FINUFFT_AVAIL:
+                raise RuntimeError("CPU requested but finufft not available")
+            
+            # finufft uses numpy dtypes
+            if dtype == torch.complex64:
+                self._c_dtype = "complex64"
+            elif dtype == torch.complex128:
+                self._c_dtype = "complex128"
+            else:
+                raise ValueError(f"Unsupported dtype: {dtype}")
+            
+            self._plan = finufft.Plan(
+                type=type,
+                dims=self.dims,
+                n_trans=n_trans,
+                eps=eps,
+                dtype=self._c_dtype,
+                isign=isign,
+                modeord=modeord,
+                **kwargs,
+            )
+            self._backend = "finufft"
+    
+    def setpts(self, *points: torch.Tensor):
+        """
+        Set the non-uniform points.
+        
+        Parameters
+        ----------
+        *points : torch.Tensor
+            Coordinates for each dimension (x, y, z, ...)
+            Each should be a 1D tensor of length N (number of points)
+        """
+        # Validate points
+        if len(points) != len(self.dims):
+            raise ValueError(
+                f"Expected {len(self.dims)} point arrays, got {len(points)}"
+            )
+        
+        n_pts = points[0].shape[0]
+        for i, p in enumerate(points):
+            if p.shape[0] != n_pts:
+                raise ValueError(
+                    f"All point arrays must have same length, got {p.shape[0]} vs {n_pts}"
+                )
+        
+        if self._backend == "cufinufft":
+            # cuFINUFFT expects separate arrays for each dimension
+            self._plan.setpts(*points)
+        else:  # finufft
+            # finufft expects numpy arrays
+            import numpy as np
+            numpy_points = [p.cpu().numpy() for p in points]
+            self._plan.setpts(*numpy_points)
+    
+    def execute(self, data: torch.Tensor) -> torch.Tensor:
+        if self._backend == "cufinufft":
+            batch_shape = data.shape[:-1] if self.type == 1 else data.shape[:-len(self.dims)]
+            data_flat = data.reshape(-1, data.shape[-1] if self.type == 1 else data.shape[-len(self.dims):])
+            n_batch = data_flat.shape[0]
+            
+            if n_batch == 1 or self.n_trans == n_batch:
+                out_flat = self._plan.execute(data_flat)
+            else:
+                out_flat = torch.cat([self._plan.execute(data_flat[i:i+1]) for i in range(n_batch)], dim=0)
+            
+            if self.type == 1:
+                return out_flat.reshape(*batch_shape, *self.dims)
+            return out_flat.reshape(*batch_shape, -1)
+            
+        else:
+            batch_shape = data.shape[:-1] if self.type == 1 else data.shape[:-len(self.dims)]
+            data_flat = data.reshape(-1, data.shape[-1] if self.type == 1 else data.shape[-len(self.dims):])
+            
+            out_np = self._plan.execute(data_flat.cpu().numpy())
+            out_flat = torch.from_numpy(out_np).to(self.device)
+            
+            if self.type == 1:
+                return out_flat.reshape(*batch_shape, *self.dims)
+            return out_flat.reshape(*batch_shape, -1)
+    
+    def destroy(self):
+        """Explicitly destroy the plan to free resources."""
+        if hasattr(self._plan, 'destroy'):
+            self._plan.destroy()
+        self._plan = None
+    
+    def __del__(self):
+        self.destroy()
+
+class FinufftType1WithPlan(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: Any, plan: FinufftPlan, plan_adj: FinufftPlan, points: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+        checks.check_devices(values, points)
+        checks.check_dtypes(values, points, "Values")
+        checks.check_sizes_t1(values, points)
+        
+        points = torch.atleast_2d(points)
+        plan.setpts(*[points[i] for i in range(points.shape[0])])
+        
+        batch_dims = values.shape[:-1]
+        values_flat = values.reshape(-1, values.shape[-1])
+        finufft_out = plan.execute(values_flat)
+        finufft_out = finufft_out.reshape(*batch_dims, *plan.dims)
+        
+        if plan.modeord:
+            finufft_out = batch_ifftshift(finufft_out, points.shape[0])
+        
+        ctx.save_for_backward(points)
+        ctx.plan_adj = plan_adj
+        return finufft_out
+    
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        points, = ctx.saved_tensors
+        plan_adj = ctx.plan_adj
+        
+        if plan_adj.modeord:
+            grad_output = batch_fftshift(grad_output, points.shape[0])
+        
+        plan_adj.setpts(*[points[i] for i in range(points.shape[0])])
+        
+        batch_dims = grad_output.shape[:-len(plan_adj.dims)]
+        grad_output_flat = grad_output.reshape(-1, *plan_adj.dims)
+        grad_values = plan_adj.execute(grad_output_flat)
+        grad_values = grad_values.reshape(*batch_dims, -1)
+        
+        return None, None, None, grad_values
+
+
+class FinufftType2WithPlan(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: Any, plan: FinufftPlan, plan_adj: FinufftPlan, points: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        checks.check_devices(targets, points)
+        checks.check_dtypes(targets, points, "Targets")
+        checks.check_sizes_t2(targets, points)
+        
+        points = torch.atleast_2d(points)
+        
+        if plan.modeord:
+            targets = batch_fftshift(targets, points.shape[0])
+        
+        plan.setpts(*[points[i] for i in range(points.shape[0])])
+        
+        batch_dims = targets.shape[:-points.shape[0]]
+        targets_flat = targets.reshape(-1, *targets.shape[-points.shape[0]:])
+        finufft_out = plan.execute(targets_flat)
+        finufft_out = finufft_out.reshape(*batch_dims, points.shape[1])
+        
+        ctx.save_for_backward(points)
+        ctx.plan_adj = plan_adj
+        return finufft_out
+    
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        points, = ctx.saved_tensors
+        plan_adj = ctx.plan_adj
+        
+        plan_adj.setpts(*[points[i] for i in range(points.shape[0])])
+        
+        batch_dims = grad_output.shape[:-1]
+        grad_output_flat = grad_output.reshape(-1, grad_output.shape[-1])
+        grad_targets = plan_adj.execute(grad_output_flat)
+        grad_targets = grad_targets.reshape(*batch_dims, *plan_adj.dims)
+        
+        if plan_adj.modeord:
+            grad_targets = batch_ifftshift(grad_targets, points.shape[0])
+        
+        return None, None, None, grad_targets
+
+
 
 class FinufftType1(torch.autograd.Function):
     """
@@ -453,6 +696,47 @@ class FinufftType2(torch.autograd.Function):
             None,
             None,
         )
+
+def create_plan(
+    type: int,
+    dims: Union[int, Tuple[int, ...]],
+    n_trans: int = 1,
+    eps: float = 1e-6,
+    dtype: torch.dtype = torch.complex64,
+    isign: int = 1,
+    modeord: int = 0,
+    device: Union[str, torch.device] = "cpu",
+    **kwargs,
+) -> FinufftPlan:
+    
+    return FinufftPlan(
+        type=type,
+        dims=dims,
+        n_trans=n_trans,
+        eps=eps,
+        dtype=dtype,
+        isign=isign,
+        modeord=modeord,
+        device=device,
+        **kwargs,
+    )
+
+def finufft_type1_plan(
+    plan: FinufftPlan,
+    plan_adj: FinufftPlan,
+    points: torch.Tensor,
+    values: torch.Tensor,
+) -> torch.Tensor:
+    return FinufftType1WithPlan.apply(plan, plan_adj, points, values)
+
+
+def finufft_type2_plan(
+    plan: FinufftPlan,
+    plan_adj: FinufftPlan,
+    points: torch.Tensor,
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    return FinufftType2WithPlan.apply(plan, plan_adj, points, targets)
 
 
 def finufft_type1(
