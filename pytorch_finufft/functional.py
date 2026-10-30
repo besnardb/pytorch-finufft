@@ -141,45 +141,33 @@ class FinufftPlan:
             if not CUFINUFFT_AVAIL:
                 raise RuntimeError("CUDA requested but cufinufft not available")
             
-            # cufinufft uses complex64/complex128 directly
-            if dtype == torch.complex64:
-                self._c_dtype = "complex64"
-            elif dtype == torch.complex128:
-                self._c_dtype = "complex128"
-            else:
-                raise ValueError(f"Unsupported dtype: {dtype}")
+            c_dtype = "complex64" if dtype == torch.complex64 else "complex128"
             
             self._plan = cufinufft.Plan(
-                type=type,
-                dims=self.dims,
+                type,
+                self.dims,
                 n_trans=n_trans,
                 eps=eps,
-                dtype=self._c_dtype,
+                dtype=c_dtype,
                 isign=isign,
                 modeord=modeord,
                 gpu_device_id=self.device.index if self.device.index is not None else 0,
                 **kwargs,
             )
             self._backend = "cufinufft"
-            
-        else:  # CPU
+
+        else:
             if not FINUFFT_AVAIL:
                 raise RuntimeError("CPU requested but finufft not available")
             
-            # finufft uses numpy dtypes
-            if dtype == torch.complex64:
-                self._c_dtype = "complex64"
-            elif dtype == torch.complex128:
-                self._c_dtype = "complex128"
-            else:
-                raise ValueError(f"Unsupported dtype: {dtype}")
+            c_dtype = "complex64" if dtype == torch.complex64 else "complex128"
             
             self._plan = finufft.Plan(
-                type=type,
-                dims=self.dims,
+                type,
+                self.dims,
                 n_trans=n_trans,
                 eps=eps,
-                dtype=self._c_dtype,
+                dtype=c_dtype,
                 isign=isign,
                 modeord=modeord,
                 **kwargs,
