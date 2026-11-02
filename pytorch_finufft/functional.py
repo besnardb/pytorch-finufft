@@ -192,30 +192,31 @@ class FinufftPlan:
             self._plan.setpts(*numpy_points)
     
     def execute(self, data: torch.Tensor) -> torch.Tensor:
+        if self.type == 1:
+            batch_shape = data.shape[:-1]
+            data_flat = data.reshape(-1, data.shape[-1])
+        else:
+            batch_shape = data.shape[:-len(self.dims)]
+            data_flat = data.reshape(-1, *self.dims)
+
         if self._backend == "cufinufft":
-            batch_shape = data.shape[:-1] if self.type == 1 else data.shape[:-len(self.dims)]
-            data_flat = data.reshape(-1, data.shape[-1] if self.type == 1 else data.shape[-len(self.dims):])
             n_batch = data_flat.shape[0]
-            
-            if n_batch == 1 or self.n_trans == n_batch:
+
+            if n_batch == self.n_trans:
                 out_flat = self._plan.execute(data_flat)
             else:
-                out_flat = torch.cat([self._plan.execute(data_flat[i:i+1]) for i in range(n_batch)], dim=0)
-            
-            if self.type == 1:
-                return out_flat.reshape(*batch_shape, *self.dims)
-            return out_flat.reshape(*batch_shape, -1)
-            
+                out_flat = torch.cat(
+                    [self._plan.execute(data_flat[i:i+1]) for i in range(n_batch)],
+                    dim=0,
+                )
         else:
-            batch_shape = data.shape[:-1] if self.type == 1 else data.shape[:-len(self.dims)]
-            data_flat = data.reshape(-1, data.shape[-1] if self.type == 1 else data.shape[-len(self.dims):])
-            
-            out_np = self._plan.execute(data_flat.cpu().numpy())
-            out_flat = torch.from_numpy(out_np).to(self.device)
-            
-            if self.type == 1:
-                return out_flat.reshape(*batch_shape, *self.dims)
-            return out_flat.reshape(*batch_shape, -1)
+            out_np = self._plan.execute(data_flat.detach().cpu().numpy())
+            out_flat = torch.from_numpy(out_np).to(data.device)
+
+        if self.type == 1:
+            return out_flat.reshape(*batch_shape, *self.dims)
+
+        return out_flat.reshape(*batch_shape, -1)
     
     def destroy(self):
         """Explicitly destroy the plan to free resources."""
