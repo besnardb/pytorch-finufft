@@ -105,71 +105,56 @@ class FinufftPlan:
         device: Union[str, torch.device] = "cpu",
         **kwargs,
     ):
-        """
-        Parameters
-        ----------
-        type : int
-            NUFFT type (1 or 2)
-        dims : int or tuple of int
-            Output dimensions for type 1, input dimensions for type 2
-        n_trans : int
-            Number of transforms to compute in parallel (batch size)
-        eps : float
-            Requested precision
-        dtype : torch.dtype
-            Data type (torch.complex64 or torch.complex128)
-        isign : int
-            Sign in exponent (+1 or -1)
-        modeord : int
-            Mode ordering (0 or 1)
-        device : str or torch.device
-            Device to use ('cpu' or 'cuda')
-        **kwargs
-            Additional arguments passed to the underlying plan
-        """
-        self.type = type
+        self.type = int(type)
         self.dims = dims if isinstance(dims, tuple) else (dims,)
-        self.n_trans = n_trans
-        self.eps = eps
+        self.n_trans = int(n_trans)
+        self.eps = float(eps)
         self.dtype = dtype
-        self.isign = isign
-        self.modeord = modeord
-        self.device = torch.device(device) if isinstance(device, str) else device
-        
-        # Determine which backend to use
+        self.isign = int(isign)
+        self.modeord = int(modeord)
+        self.device = torch.device(device)
+
+        if self.device.type == "cuda" and self.device.index is None:
+            self.device = torch.device("cuda", torch.cuda.current_device())
+
         if self.device.type == "cuda":
             if not CUFINUFFT_AVAIL:
                 raise RuntimeError("CUDA requested but cufinufft not available")
-            
-            c_dtype = "complex64" if dtype == torch.complex64 else "complex128"
-            
+
+            torch.cuda.set_device(self.device.index)
+
+            kwargs.pop("modeord", None)
+            kwargs.setdefault("upsampfac", 1.25)
+
+            import numpy as np
+            np_dtype = np.complex64 if dtype == torch.complex64 else np.complex128
+
             self._plan = cufinufft.Plan(
-                type,
+                self.type,
                 self.dims,
-                n_trans=n_trans,
-                eps=eps,
-                dtype=c_dtype,
-                isign=isign,
-                modeord=modeord,
-                gpu_device_id=self.device.index if self.device.index is not None else 0,
+                n_trans=self.n_trans,
+                eps=self.eps,
+                dtype=np_dtype,
+                isign=self.isign,
+                gpu_device_id=self.device.index,
                 **kwargs,
             )
             self._backend = "cufinufft"
-
         else:
             if not FINUFFT_AVAIL:
                 raise RuntimeError("CPU requested but finufft not available")
-            
-            c_dtype = "complex64" if dtype == torch.complex64 else "complex128"
-            
+
+            import numpy as np
+            np_dtype = np.complex64 if dtype == torch.complex64 else np.complex128
+
             self._plan = finufft.Plan(
-                type,
+                self.type,
                 self.dims,
-                n_trans=n_trans,
-                eps=eps,
-                dtype=c_dtype,
-                isign=isign,
-                modeord=modeord,
+                n_trans=self.n_trans,
+                eps=self.eps,
+                dtype=np_dtype,
+                isign=self.isign,
+                modeord=self.modeord,
                 **kwargs,
             )
             self._backend = "finufft"
